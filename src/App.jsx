@@ -36,6 +36,15 @@ function App() {
   const [editingStudentId, setEditingStudentId] = useState(null);
   const [studentSaving, setStudentSaving] = useState(false);
 
+  // =========================
+  // STUDENT DELETION
+  // =========================
+
+  const [deleteStudentTarget, setDeleteStudentTarget] = useState(null);
+  const [adminDeletePassword, setAdminDeletePassword] = useState("");
+  const [confirmAdminDeletePassword, setConfirmAdminDeletePassword] = useState("");
+  const [studentDeleting, setStudentDeleting] = useState(false);
+
   const [studentForm, setStudentForm] = useState({
     id: "",
     name: "",
@@ -106,6 +115,16 @@ function App() {
   const [studentDocuments, setStudentDocuments] = useState([]);
   const [studentDataLoading, setStudentDataLoading] = useState(false);
   const [studentDataError, setStudentDataError] = useState("");
+
+  // =========================
+  // SHARED WECHAT PAYMENT QR
+  // =========================
+
+  const [wechatQrPath, setWechatQrPath] = useState("");
+  const [wechatQrUrl, setWechatQrUrl] = useState("");
+  const [selectedWechatQrFile, setSelectedWechatQrFile] = useState(null);
+  const [wechatQrUploading, setWechatQrUploading] = useState(false);
+  const [wechatQrFileInputKey, setWechatQrFileInputKey] = useState(0);
 
   // =========================
   // LOAD STUDENTS
@@ -223,6 +242,128 @@ function App() {
 
     setDocuments(data || []);
     setDocumentsLoading(false);
+  };
+
+  const loadWechatPaymentQr = async () => {
+    const { data: setting, error: settingError } = await supabase
+      .from("portal_settings")
+      .select("setting_value")
+      .eq("setting_key", "wechat_payment_qr")
+      .maybeSingle();
+
+    if (settingError) {
+      console.error(settingError);
+      setWechatQrPath("");
+      setWechatQrUrl("");
+      return;
+    }
+
+    const path = setting?.setting_value || "";
+    setWechatQrPath(path);
+
+    if (!path) {
+      setWechatQrUrl("");
+      return;
+    }
+
+    const { data: signedData, error: signedUrlError } =
+      await supabase.storage
+        .from("portal-assets")
+        .createSignedUrl(path, 3600);
+
+    if (signedUrlError || !signedData?.signedUrl) {
+      console.error(signedUrlError);
+      setWechatQrUrl("");
+      return;
+    }
+
+    setWechatQrUrl(signedData.signedUrl);
+  };
+
+  const handleWechatQrFileChange = (event) => {
+    const file = event.target.files?.[0] || null;
+    setSelectedWechatQrFile(file);
+  };
+
+  const handleWechatQrUpload = async (event) => {
+    event.preventDefault();
+
+    if (!selectedWechatQrFile) {
+      alert("Please choose a WeChat QR image first.");
+      return;
+    }
+
+    const allowedTypes = [
+      "image/jpeg",
+      "image/png",
+    ];
+
+    if (!allowedTypes.includes(selectedWechatQrFile.type)) {
+      alert("Only JPG, JPEG and PNG images are allowed for the WeChat QR.");
+      return;
+    }
+
+    const maxFileSize = 5 * 1024 * 1024;
+
+    if (selectedWechatQrFile.size > maxFileSize) {
+      alert("The QR image is too large. Maximum allowed size is 5 MB.");
+      return;
+    }
+
+    setWechatQrUploading(true);
+
+    const filePath = "payments/wechat-payment-qr";
+
+    const { error: uploadError } = await supabase.storage
+      .from("portal-assets")
+      .upload(filePath, selectedWechatQrFile, {
+        upsert: true,
+        cacheControl: "300",
+        contentType: selectedWechatQrFile.type,
+      });
+
+    if (uploadError) {
+      console.error(uploadError);
+      alert(`Could not upload WeChat QR: ${uploadError.message}`);
+      setWechatQrUploading(false);
+      return;
+    }
+
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      console.error(userError);
+      alert("Could not verify the signed-in administrator.");
+      setWechatQrUploading(false);
+      return;
+    }
+
+    const { error: settingsError } = await supabase
+      .from("portal_settings")
+      .update({
+        setting_value: filePath,
+        updated_at: new Date().toISOString(),
+        updated_by: user.id,
+      })
+      .eq("setting_key", "wechat_payment_qr");
+
+    if (settingsError) {
+      console.error(settingsError);
+      alert(`QR uploaded, but settings could not be updated: ${settingsError.message}`);
+      setWechatQrUploading(false);
+      return;
+    }
+
+    setSelectedWechatQrFile(null);
+    setWechatQrFileInputKey((previous) => previous + 1);
+    setWechatQrUploading(false);
+
+    await loadWechatPaymentQr();
+
+    alert("WeChat payment QR updated successfully for all student portals.");
   };
 
   const loadStudentPortalData = async () => {
@@ -454,10 +595,12 @@ function App() {
       loadStudents();
       loadPayments();
       loadDocuments();
+      loadWechatPaymentQr();
     }
 
     if (loggedIn && userRole === "student") {
       loadStudentPortalData();
+      loadWechatPaymentQr();
     }
   }, [loggedIn, userRole]);
 
@@ -772,6 +915,98 @@ function App() {
     setStudentSaving(false);
 
     await loadStudents();
+  };
+
+  const openDeleteStudent = (student) => {
+    setDeleteStudentTarget(student);
+    setAdminDeletePassword("");
+    setConfirmAdminDeletePassword("");
+  };
+
+  const closeDeleteStudent = () => {
+    if (studentDeleting) return;
+
+    setDeleteStudentTarget(null);
+    setAdminDeletePassword("");
+    setConfirmAdminDeletePassword("");
+  };
+
+  const handleDeleteStudent = async (event) => {
+    event.preventDefault();
+
+    if (!deleteStudentTarget) return;
+
+    if (!adminDeletePassword || !confirmAdminDeletePassword) {
+      alert("Please enter the administrator password twice.");
+      return;
+    }
+
+    if (adminDeletePassword !== confirmAdminDeletePassword) {
+      alert("The two administrator password entries do not match.");
+      return;
+    }
+
+    setStudentDeleting(true);
+
+    const { data: functionData, error: functionError } =
+      await supabase.functions.invoke("delete-student", {
+        body: {
+          student_id: deleteStudentTarget.id,
+          admin_password: adminDeletePassword,
+        },
+      });
+
+    if (functionError) {
+      console.error(functionError);
+
+      let message =
+        functionError.message ||
+        "Could not delete the student.";
+
+      try {
+        if (
+          functionError.context &&
+          typeof functionError.context.json === "function"
+        ) {
+          const errorBody = await functionError.context.json();
+
+          if (errorBody?.error) {
+            message = errorBody.error;
+          }
+        }
+      } catch (contextError) {
+        console.error(contextError);
+      }
+
+      alert(`Could not delete student: ${message}`);
+      setStudentDeleting(false);
+      return;
+    }
+
+    if (!functionData?.success) {
+      alert(
+        `Could not delete student: ${
+          functionData?.error || "Unknown server response."
+        }`
+      );
+      setStudentDeleting(false);
+      return;
+    }
+
+    alert(
+      `${deleteStudentTarget.name} (${deleteStudentTarget.id}) was deleted successfully.`
+    );
+
+    setStudentDeleting(false);
+    setDeleteStudentTarget(null);
+    setAdminDeletePassword("");
+    setConfirmAdminDeletePassword("");
+
+    await Promise.all([
+      loadStudents(),
+      loadPayments(),
+      loadDocuments(),
+    ]);
   };
 
   const filteredStudents = students.filter((student) => {
@@ -1239,108 +1474,217 @@ function App() {
     });
 
     const pageWidth = doc.internal.pageSize.getWidth();
-    const left = 20;
-    const right = pageWidth - 20;
+    const pageHeight = doc.internal.pageSize.getHeight();
 
+    const margin = 14;
+    const cardX = 14;
+    const cardY = 14;
+    const cardW = pageWidth - 28;
+    const cardH = pageHeight - 28;
+
+    const navy = [11, 31, 58];
+    const blue = [47, 107, 255];
+    const lightBlue = [238, 244, 255];
+    const lightGray = [247, 249, 252];
+    const lineGray = [217, 226, 240];
+    const muted = [107, 122, 144];
+    const green = [30, 158, 98];
+    const lightGreen = [234, 248, 241];
+
+    doc.setFillColor(...lightGray);
+    doc.rect(0, 0, pageWidth, pageHeight, "F");
+
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(cardX, cardY, cardW, cardH, 5, 5, "F");
+
+    doc.setFillColor(...navy);
+    doc.roundedRect(cardX, cardY, cardW, 37, 5, 5, "F");
+    doc.rect(cardX, cardY + 27, cardW, 10, "F");
+
+    doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(20);
-    doc.text("STUDENT PORTAL", left, 24);
+    doc.text("AVA Education Services", cardX + 9, cardY + 14);
 
-    doc.setFontSize(13);
-    doc.text("OFFICIAL PAYMENT RECEIPT", left, 34);
+    doc.setTextColor(191, 208, 255);
+    doc.setFontSize(11);
+    doc.text("Payment Receipt", cardX + 9, cardY + 23);
 
-    doc.setDrawColor(210);
-    doc.line(left, 40, right, 40);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    doc.text(`Receipt Reference: ${receiptReference}`, left, 50);
-    doc.text(`Invoice Number: ${payment.invoice_number}`, left, 57);
-    doc.text(`Payment Date: ${paymentDate}`, left, 64);
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.text("Student Details", left, 80);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    doc.text(`Student Name: ${studentRecord.full_name}`, left, 89);
-    doc.text(`Student ID: ${studentRecord.student_id}`, left, 96);
-    doc.text(
-      `Program: ${studentRecord.course_or_program || "-"}`,
-      left,
-      103
-    );
-    doc.text(`Intake: ${studentRecord.intake || "-"}`, left, 110);
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(12);
-    doc.text("Payment Details", left, 126);
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-
-    const description =
-      payment.description || "Student Payment";
-
-    const detailRows = [
-      ["Description", description],
-      ["Amount", `LKR ${Number(payment.amount || 0).toLocaleString()}`],
-      ["Payment Method", payment.payment_method || "-"],
-      [
-        "Transaction Reference",
-        payment.transaction_reference || "-",
-      ],
-      ["Status", "Verified"],
-    ];
-
-    let y = 137;
-
-    detailRows.forEach(([label, value]) => {
-      doc.setFont("helvetica", "bold");
-      doc.text(`${label}:`, left, y);
-
-      doc.setFont("helvetica", "normal");
-      const wrappedValue = doc.splitTextToSize(String(value), 105);
-      doc.text(wrappedValue, 65, y);
-      y += Math.max(8, wrappedValue.length * 5);
+    doc.setFillColor(...lightGreen);
+    doc.roundedRect(pageWidth - margin - 34, cardY + 10, 25, 9, 4, 4, "F");
+    doc.setTextColor(...green);
+    doc.setFontSize(8);
+    doc.text("VERIFIED", pageWidth - margin - 21.5, cardY + 16, {
+      align: "center",
     });
 
-    doc.setDrawColor(210);
-    doc.line(left, y + 4, right, y + 4);
+    const metaTop = cardY + 51;
+    const colWidth = (cardW - 18) / 3;
+    const metaRows = [
+      ["RECEIPT REFERENCE", receiptReference],
+      ["INVOICE NUMBER", payment.invoice_number || "-"],
+      ["PAYMENT DATE", paymentDate],
+    ];
 
+    metaRows.forEach(([label, value], index) => {
+      const x = cardX + 9 + index * colWidth;
+
+      doc.setTextColor(...muted);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.text(label, x, metaTop);
+
+      doc.setTextColor(...navy);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.text(String(value), x, metaTop + 6);
+    });
+
+    doc.setDrawColor(...lineGray);
+    doc.line(cardX + 9, metaTop + 13, cardX + cardW - 9, metaTop + 13);
+
+    const studentTitleY = metaTop + 24;
+
+    doc.setTextColor(...navy);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
+    doc.setFontSize(13);
+    doc.text("Student Details", cardX + 9, studentTitleY);
+
+    const studentBoxY = studentTitleY + 7;
+    doc.setFillColor(...lightBlue);
+    doc.roundedRect(cardX + 9, studentBoxY, cardW - 18, 33, 3, 3, "F");
+
+    const studentDetails = [
+      ["Student Name", studentRecord.full_name || "-"],
+      ["Student ID", studentRecord.student_id || "-"],
+      ["Program", studentRecord.course_or_program || "-"],
+      ["Intake", studentRecord.intake || "-"],
+    ];
+
+    studentDetails.forEach(([label, value], index) => {
+      const leftColumn = index < 2;
+      const x = leftColumn ? cardX + 14 : cardX + cardW / 2 + 4;
+      const row = index % 2;
+      const y = studentBoxY + 10 + row * 13;
+
+      doc.setTextColor(...muted);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.text(label, x, y);
+
+      doc.setTextColor(...navy);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      const wrapped = doc.splitTextToSize(String(value), 72);
+      doc.text(wrapped, x, y + 5);
+    });
+
+    const paymentTitleY = studentBoxY + 46;
+
+    doc.setTextColor(...navy);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text("Payment Details", cardX + 9, paymentTitleY);
+
+    const detailRows = [
+      ["Description", payment.description || "Student Payment"],
+      ["Amount", `RMB ${Number(payment.amount || 0).toLocaleString()}`],
+      ["Payment Method", payment.payment_method || "WeChat QR"],
+      ["Transaction Reference", payment.transaction_reference || "-"],
+    ];
+
+    let rowY = paymentTitleY + 8;
+
+    detailRows.forEach(([label, value], index) => {
+      if (index % 2 === 0) {
+        doc.setFillColor(251, 252, 254);
+        doc.rect(cardX + 9, rowY, cardW - 18, 11, "F");
+      }
+
+      doc.setTextColor(...muted);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      doc.text(label, cardX + 13, rowY + 7);
+
+      doc.setTextColor(...navy);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.text(
+        String(value),
+        cardX + cardW - 13,
+        rowY + 7,
+        { align: "right" }
+      );
+
+      rowY += 11;
+    });
+
+    const totalY = rowY + 7;
+
+    doc.setFillColor(...navy);
+    doc.roundedRect(cardX + 9, totalY, cardW - 18, 16, 3, 3, "F");
+
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.text("TOTAL PAID", cardX + 14, totalY + 10);
+
+    doc.setFontSize(14);
     doc.text(
-      `Total Paid: LKR ${Number(payment.amount || 0).toLocaleString()}`,
-      left,
-      y + 15
+      `RMB ${Number(payment.amount || 0).toLocaleString()}`,
+      cardX + cardW - 14,
+      totalY + 10,
+      { align: "right" }
     );
 
+    doc.setTextColor(...muted);
     doc.setFont("helvetica", "normal");
-    doc.setFontSize(9);
+    doc.setFontSize(8);
     doc.text(
       "This receipt was generated electronically after payment verification.",
-      left,
-      y + 31
+      cardX + 9,
+      totalY + 29
     );
     doc.text(
       "Keep this receipt for your records.",
-      left,
-      y + 37
+      cardX + 9,
+      totalY + 35
     );
 
-    doc.setFontSize(8);
+    const footerY = pageHeight - 24;
+    doc.setDrawColor(...lineGray);
+    doc.line(cardX + 9, footerY - 7, cardX + cardW - 9, footerY - 7);
+
+    doc.setTextColor(...muted);
+    doc.setFontSize(7.5);
     doc.text(
       `Generated on ${new Date().toLocaleString()}`,
-      left,
-      282
+      cardX + 9,
+      footerY
+    );
+    doc.text(
+      "AVA Education Services",
+      cardX + cardW - 9,
+      footerY,
+      { align: "right" }
     );
 
     const safeInvoice = String(payment.invoice_number || "receipt")
       .replace(/[^a-zA-Z0-9._-]/g, "_");
 
     doc.save(`${receiptReference}_${safeInvoice}.pdf`);
+  };
+
+  const getStudentDisplayName = (fullName) => {
+    const parts = String(fullName || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+    if (parts.length === 0) return "Student";
+    if (parts.length === 1) return parts[0];
+
+    return `${parts[0]} ${parts[parts.length - 1]}`;
   };
 
   const studentTotalInvoiced = studentPayments.reduce(
@@ -1364,7 +1708,7 @@ function App() {
     return (
       <div className="portal-page">
         <div className="login-card">
-          <div className="portal-badge">STUDENT PORTAL</div>
+          <div className="portal-badge">AVA STUDENT PORTAL</div>
           <h1>Loading Portal</h1>
           <p className="subtitle">
             Restoring your secure session...
@@ -1378,7 +1722,7 @@ function App() {
     return (
       <div className="portal-page">
         <div className="login-card">
-          <div className="portal-badge">STUDENT PORTAL</div>
+          <div className="portal-badge">AVA STUDENT PORTAL</div>
 
           <h1>Set New Password</h1>
 
@@ -1597,14 +1941,37 @@ function App() {
                               </td>
 
                               <td>
-                                <button
-                                  className="small-button"
-                                  onClick={() =>
-                                    openEditStudent(student)
-                                  }
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: "8px",
+                                    flexWrap: "wrap",
+                                  }}
                                 >
-                                  Edit
-                                </button>
+                                  <button
+                                    className="small-button"
+                                    onClick={() =>
+                                      openEditStudent(student)
+                                    }
+                                  >
+                                    Edit
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    className="small-button"
+                                    onClick={() =>
+                                      openDeleteStudent(student)
+                                    }
+                                    style={{
+                                      background: "#b42318",
+                                      color: "#ffffff",
+                                      borderColor: "#b42318",
+                                    }}
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           ))}
@@ -1780,6 +2147,91 @@ function App() {
                   </form>
                 </div>
               )}
+
+              {deleteStudentTarget && (
+                <div className="dashboard-section">
+                  <p className="section-label">
+                    Permanent Student Deletion
+                  </p>
+
+                  <h2>Delete Student</h2>
+
+                  <p>
+                    You are about to permanently delete{" "}
+                    <strong>{deleteStudentTarget.name}</strong>{" "}
+                    ({deleteStudentTarget.id}).
+                  </p>
+
+                  <p
+                    style={{
+                      color: "#b42318",
+                      fontWeight: "600",
+                      marginBottom: "20px",
+                    }}
+                  >
+                    This action cannot be undone. The student account and linked
+                    portal records will be removed.
+                  </p>
+
+                  <form onSubmit={handleDeleteStudent}>
+                    <label>Administrator Password</label>
+
+                    <input
+                      type="password"
+                      value={adminDeletePassword}
+                      onChange={(event) =>
+                        setAdminDeletePassword(event.target.value)
+                      }
+                      placeholder="Enter your admin password"
+                      autoComplete="current-password"
+                      disabled={studentDeleting}
+                    />
+
+                    <label>Confirm Administrator Password</label>
+
+                    <input
+                      type="password"
+                      value={confirmAdminDeletePassword}
+                      onChange={(event) =>
+                        setConfirmAdminDeletePassword(event.target.value)
+                      }
+                      placeholder="Enter the same admin password again"
+                      autoComplete="current-password"
+                      disabled={studentDeleting}
+                    />
+
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: "12px",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <button
+                        type="submit"
+                        disabled={studentDeleting}
+                        style={{
+                          background: "#b42318",
+                          borderColor: "#b42318",
+                        }}
+                      >
+                        {studentDeleting
+                          ? "Deleting..."
+                          : "Permanently Delete Student"}
+                      </button>
+
+                      <button
+                        type="button"
+                        className="signout-button"
+                        onClick={closeDeleteStudent}
+                        disabled={studentDeleting}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
             </>
 
           /* ================= ADMIN PAYMENTS ================= */
@@ -1851,7 +2303,7 @@ function App() {
                   </p>
 
                   <h3>
-                    LKR{" "}
+                    RMB{" "}
                     {totalVerified.toLocaleString()}
                   </h3>
 
@@ -1917,7 +2369,7 @@ function App() {
                       placeholder="Example: Course Fee"
                     />
 
-                    <label>Amount (LKR)</label>
+                    <label>Amount (RMB)</label>
 
                     <input
                       type="text"
@@ -2028,7 +2480,7 @@ function App() {
                               </td>
 
                               <td>
-                                LKR{" "}
+                                RMB{" "}
                                 {Number(
                                   payment.amount
                                 ).toLocaleString()}
@@ -2111,6 +2563,84 @@ function App() {
                       </table>
                     </div>
                   )}
+              </div>
+
+              <div className="dashboard-section">
+                <p className="section-label">
+                  Payment QR Settings
+                </p>
+
+                <h2>WeChat Payment QR</h2>
+
+                <p
+                  style={{
+                    color: "#6b7280",
+                    marginBottom: "18px",
+                  }}
+                >
+                  Upload or replace the QR shown to every student. Changes here
+                  are shared automatically across all student payment pages.
+                </p>
+
+                {wechatQrUrl && (
+                  <div
+                    style={{
+                      marginBottom: "20px",
+                    }}
+                  >
+                    <img
+                      src={wechatQrUrl}
+                      alt="Current WeChat payment QR"
+                      style={{
+                        width: "220px",
+                        maxWidth: "100%",
+                        height: "auto",
+                        borderRadius: "16px",
+                        border: "1px solid #d8deea",
+                        background: "#ffffff",
+                        padding: "10px",
+                      }}
+                    />
+                  </div>
+                )}
+
+                <form onSubmit={handleWechatQrUpload}>
+                  <label>
+                    {wechatQrPath
+                      ? "Replace WeChat QR"
+                      : "Upload WeChat QR"}
+                  </label>
+
+                  <input
+                    key={wechatQrFileInputKey}
+                    type="file"
+                    accept=".jpg,.jpeg,.png,image/jpeg,image/png"
+                    onChange={handleWechatQrFileChange}
+                    disabled={wechatQrUploading}
+                  />
+
+                  <p
+                    style={{
+                      fontSize: "13px",
+                      color: "#8a94a8",
+                      marginTop: "-8px",
+                      marginBottom: "18px",
+                    }}
+                  >
+                    JPG, JPEG or PNG. Maximum size: 5 MB.
+                  </p>
+
+                  <button
+                    type="submit"
+                    disabled={wechatQrUploading}
+                  >
+                    {wechatQrUploading
+                      ? "Updating QR..."
+                      : wechatQrPath
+                      ? "Replace QR"
+                      : "Upload QR"}
+                  </button>
+                </form>
               </div>
 
               <div className="dashboard-section">
@@ -2477,7 +3007,7 @@ function App() {
                   </p>
 
                   <h3>
-                    LKR {totalVerified.toLocaleString()}
+                    RMB {totalVerified.toLocaleString()}
                   </h3>
 
                   <p className="card-note">
@@ -2557,7 +3087,7 @@ function App() {
       return (
         <div className="portal-page">
           <div className="login-card">
-            <div className="portal-badge">STUDENT PORTAL</div>
+            <div className="portal-badge">AVA STUDENT PORTAL</div>
             <h1>
               {studentDataError ? "Unable to Load Account" : "Loading Portal"}
             </h1>
@@ -2582,11 +3112,11 @@ function App() {
         <aside className="sidebar">
           <div>
             <div className="portal-badge">
-              STUDENT PORTAL
+              AVA STUDENT PORTAL
             </div>
 
             <div className="student-mini-profile">
-              <h2>{studentRecord.full_name}</h2>
+              <h2>{getStudentDisplayName(studentRecord.full_name)}</h2>
               <p>{studentRecord.student_id}</p>
             </div>
 
@@ -2800,7 +3330,7 @@ function App() {
                   </p>
 
                   <h3>
-                    LKR {studentTotalInvoiced.toLocaleString()}
+                    RMB {studentTotalInvoiced.toLocaleString()}
                   </h3>
                 </div>
 
@@ -2810,7 +3340,7 @@ function App() {
                   </p>
 
                   <h3>
-                    LKR {studentVerifiedAmount.toLocaleString()}
+                    RMB {studentVerifiedAmount.toLocaleString()}
                   </h3>
                 </div>
 
@@ -2820,7 +3350,7 @@ function App() {
                   </p>
 
                   <h3>
-                    LKR {studentOutstandingAmount.toLocaleString()}
+                    RMB {studentOutstandingAmount.toLocaleString()}
                   </h3>
                 </div>
 
@@ -2837,6 +3367,63 @@ function App() {
                       : "No Invoices"}
                   </h3>
                 </div>
+              </div>
+
+              <div className="dashboard-section">
+                <p className="section-label">
+                  WeChat Payment
+                </p>
+
+                <h2>Scan to Pay</h2>
+
+                {wechatQrUrl ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "24px",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <img
+                      src={wechatQrUrl}
+                      alt="WeChat payment QR"
+                      style={{
+                        width: "240px",
+                        maxWidth: "100%",
+                        height: "auto",
+                        borderRadius: "18px",
+                        border: "1px solid #d8deea",
+                        background: "#ffffff",
+                        padding: "12px",
+                      }}
+                    />
+
+                    <div>
+                      <h3 style={{ marginTop: 0 }}>
+                        Pay using WeChat
+                      </h3>
+
+                      <p>
+                        Scan this QR in WeChat to complete your payment.
+                      </p>
+
+                      <p
+                        style={{
+                          color: "#8a94a8",
+                          fontSize: "13px",
+                        }}
+                      >
+                        After paying, submit the transaction reference and
+                        payment proof for administrator verification.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <p>
+                    The payment QR has not been added by the administrator yet.
+                  </p>
+                )}
               </div>
 
               <div className="dashboard-section">
@@ -2872,7 +3459,7 @@ function App() {
                                 {payment.description || "Student Payment"}
                               </td>
                               <td>
-                                LKR{" "}
+                                RMB{" "}
                                 {Number(payment.amount || 0).toLocaleString()}
                               </td>
                               <td>{payment.payment_method || "-"}</td>
@@ -2926,7 +3513,7 @@ function App() {
                                     </p>
 
                                     <h3>
-                                      {payment.invoice_number} • LKR{" "}
+                                      {payment.invoice_number} • RMB{" "}
                                       {Number(
                                         payment.amount || 0
                                       ).toLocaleString()}
@@ -3062,7 +3649,7 @@ function App() {
                             </td>
                             <td>{payment.invoice_number}</td>
                             <td>
-                              LKR{" "}
+                              RMB{" "}
                               {Number(payment.amount || 0).toLocaleString()}
                             </td>
                             <td>
@@ -3151,7 +3738,7 @@ function App() {
                     Welcome back
                   </p>
 
-                  <h1>{studentRecord.full_name}</h1>
+                  <h1>{getStudentDisplayName(studentRecord.full_name)}</h1>
                 </div>
 
                 <div className="student-id-box">
@@ -3184,7 +3771,7 @@ function App() {
                   </p>
 
                   <h3>
-                    LKR {studentOutstandingAmount.toLocaleString()}
+                    RMB {studentOutstandingAmount.toLocaleString()}
                   </h3>
                 </div>
 
@@ -3219,7 +3806,7 @@ function App() {
     <div className="portal-page">
       <div className="login-card">
         <div className="portal-badge">
-          STUDENT PORTAL
+          AVA STUDENT PORTAL
         </div>
 
         <h1>Welcome Back</h1>
