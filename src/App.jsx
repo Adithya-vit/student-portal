@@ -127,6 +127,47 @@ function App() {
   const [wechatQrFileInputKey, setWechatQrFileInputKey] = useState(0);
 
   // =========================
+  // VISA MANAGEMENT
+  // =========================
+  const visaStatuses = ["Not Started", "Documents Pending", "Submitted", "Under Review", "Approved", "Visa Issued", "Rejected", "Action Required"];
+  const [visaRecords, setVisaRecords] = useState([]);
+  const [studentVisa, setStudentVisa] = useState(null);
+  const [visaLoading, setVisaLoading] = useState(false);
+  const [visaError, setVisaError] = useState("");
+  const [visaStudentId, setVisaStudentId] = useState("");
+  const [visaSaving, setVisaSaving] = useState(false);
+  const [visaForm, setVisaForm] = useState({status:"Not Started",submitted_at:"",issued_at:"",expiry_date:"",student_note:"",internal_note:""});
+  const visaDate = (value) => value ? new Date(`${value}T12:00:00`).toLocaleDateString() : "Not available";
+  const loadVisaRecords = async () => {
+    setVisaLoading(true); setVisaError("");
+    const {data,error} = await supabase.from("visa_status").select("student_id,status,submitted_at,issued_at,expiry_date,student_note,internal_note,updated_at");
+    if(error) {setVisaError(error.message);setVisaRecords([]);} else setVisaRecords(data || []);
+    setVisaLoading(false);
+  };
+  const loadOwnVisa = async (studentId) => {
+    // The server RPC exposes only student-safe fields, never internal_note.
+    const {data,error} = await supabase.rpc("get_my_visa_status");
+    if(error) {setVisaError("Unable to load visa status.");setStudentVisa(null);return;}
+    setVisaError("");setStudentVisa(data?.[0] || null);
+  };
+  const chooseVisaStudent = (id) => {
+    setVisaStudentId(id);
+    const record = visaRecords.find(item => item.student_id === id);
+    setVisaForm({status:record?.status || "Not Started",submitted_at:record?.submitted_at || "",issued_at:record?.issued_at || "",expiry_date:record?.expiry_date || "",student_note:record?.student_note || "",internal_note:record?.internal_note || ""});
+  };
+  const saveVisa = async (event) => {
+    event.preventDefault();if(!visaStudentId || visaSaving)return;
+    setVisaSaving(true);
+    const {data:{user},error:userError} = await supabase.auth.getUser();
+    if(userError || !user){alert("Admin session could not be verified.");setVisaSaving(false);return;}
+    const payload={student_id:visaStudentId,status:visaForm.status,submitted_at:visaForm.submitted_at || null,issued_at:visaForm.issued_at || null,expiry_date:visaForm.expiry_date || null,student_note:visaForm.student_note.trim() || null,internal_note:visaForm.internal_note.trim() || null,updated_at:new Date().toISOString(),updated_by:user.id};
+    const {error} = await supabase.from("visa_status").upsert(payload,{onConflict:"student_id"});
+    setVisaSaving(false);
+    if(error){alert(`Could not save visa status: ${error.message}`);return;}
+    await loadVisaRecords();alert("Visa status saved successfully.");
+  };
+
+  // =========================
   // LOAD STUDENTS
   // =========================
 
@@ -463,6 +504,7 @@ function App() {
     setStudentRecord(student);
     setStudentPayments(ownPayments || []);
     setStudentDocuments(ownDocuments || []);
+    await loadOwnVisa(student.student_id);
     setStudentDataLoading(false);
     return true;
   };
@@ -571,6 +613,8 @@ function App() {
         setStudentRecord(null);
         setStudentPayments([]);
         setStudentDocuments([]);
+        setStudentVisa(null);
+        setVisaRecords([]);
         setAuthReady(true);
         return;
       }
@@ -596,6 +640,7 @@ function App() {
       loadPayments();
       loadDocuments();
       loadWechatPaymentQr();
+      loadVisaRecords();
     }
 
     if (loggedIn && userRole === "student") {
@@ -757,6 +802,8 @@ function App() {
     setStudentRecord(null);
     setStudentPayments([]);
     setStudentDocuments([]);
+    setStudentVisa(null);
+    setVisaRecords([]);
     setStudentDataError("");
     setSelectedProofPaymentId(null);
     setPaymentProofReference("");
@@ -1836,6 +1883,7 @@ function App() {
               >
                 Documents
               </button>
+              <button className={`menu-item ${activePage === "admin-visas" ? "active" : ""}`} onClick={() => {setActivePage("admin-visas");loadVisaRecords();}}>Visa Management</button>
             </nav>
           </div>
 
@@ -2939,6 +2987,31 @@ function App() {
               </div>
             </>
 
+          ) : activePage === "admin-visas" ? (
+            <>
+              <div className="dashboard-header"><div><p className="welcome-small">Administration</p><h1>Visa Management</h1></div></div>
+              <div className="dashboard-section">
+                <p className="section-label">Student Visa Records</p><h2>Update Visa Status</h2>
+                <p>Select a student, edit the details, and save. Internal notes are restricted to administrators.</p>
+                {visaError && <p style={{color:"red"}}>{visaError}</p>}
+                {visaLoading && <p>Loading visa records...</p>}
+                <form onSubmit={saveVisa}>
+                  <label>Student</label>
+                  <select value={visaStudentId} onChange={e=>chooseVisaStudent(e.target.value)} required>
+                    <option value="">Select a student</option>
+                    {students.map(st=><option key={st.id} value={st.id}>{st.name} ({st.id})</option>)}
+                  </select>
+                  <label>Visa Status</label>
+                  <select value={visaForm.status} onChange={e=>setVisaForm(p=>({...p,status:e.target.value}))}>{visaStatuses.map(status=><option key={status} value={status}>{status}</option>)}</select>
+                  {[["submitted_at","Submission Date"],["issued_at","Issue Date"],["expiry_date","Expiry Date"]].map(([field,label])=><Fragment key={field}><label>{label}</label><input type="date" value={visaForm[field]} onChange={e=>setVisaForm(p=>({...p,[field]:e.target.value}))}/></Fragment>)}
+                  <label>Message to Student</label><textarea rows={3} value={visaForm.student_note} onChange={e=>setVisaForm(p=>({...p,student_note:e.target.value}))} placeholder="Visible to this student"/>
+                  <label>Internal Admin Note</label><textarea rows={3} value={visaForm.internal_note} onChange={e=>setVisaForm(p=>({...p,internal_note:e.target.value}))} placeholder="Administrators only"/>
+                  <button type="submit" disabled={!visaStudentId || visaSaving}>{visaSaving ? "Saving..." : "Save Visa Status"}</button>
+                </form>
+              </div>
+              <div className="dashboard-section"><h2>Current Visa Records</h2><div className="table-container"><table><thead><tr><th>Student</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead><tbody>{students.map(st=>{const record=visaRecords.find(r=>r.student_id===st.id);return <tr key={st.id}><td>{st.name} ({st.id})</td><td>{record?.status || "Not Started"}</td><td>{record?.updated_at ? new Date(record.updated_at).toLocaleDateString() : "-"}</td><td><button className="small-button" onClick={()=>chooseVisaStudent(st.id)}>Edit</button></td></tr>})}</tbody></table></div></div>
+            </>
+
           /* ================= ADMIN DASHBOARD ================= */
 
           ) : (
@@ -3174,6 +3247,7 @@ function App() {
               >
                 Documents
               </button>
+              <button className={`menu-item ${activePage === "visa" ? "active" : ""}`} onClick={() => setActivePage("visa")}>Visa Status</button>
             </nav>
           </div>
 
@@ -3187,7 +3261,22 @@ function App() {
 
         <main className="dashboard-content student-dashboard-content">
 
-          {activePage === "profile" ? (
+          {activePage === "visa" ? (
+            <>
+              <div className="dashboard-header"><div><p className="welcome-small">Application Progress</p><h1>Visa Status</h1></div></div>
+              <div className="dashboard-section"><p className="section-label">Your Application</p><h2>{studentVisa?.status || "Not Started"}</h2>
+                {visaError && <p style={{color:"red"}}>{visaError}</p>}
+                <p>{studentVisa?.student_note || "There are no visa updates yet. Please check back later."}</p>
+                <div className="summary-grid">
+                  {[["Submitted",visaDate(studentVisa?.submitted_at)],["Issued",visaDate(studentVisa?.issued_at)],["Expiry",visaDate(studentVisa?.expiry_date)],["Last Updated",studentVisa?.updated_at ? new Date(studentVisa.updated_at).toLocaleDateString() : "Not available"]].map(([label,value])=><div className="summary-card" key={label}><p className="card-label">{label}</p><h3>{value}</h3></div>)}
+                </div>
+              </div>
+              <div className="dashboard-section"><p className="section-label">Progress Timeline</p><h2>Application Stages</h2>
+                <div style={{display:"flex",flexWrap:"wrap",gap:"10px",marginTop:"18px"}}>{["Documents Pending","Submitted","Under Review","Approved","Visa Issued"].map((stage,index,stages)=>{const current=studentVisa?.status || "Not Started";const progress=stages.indexOf(current);const reached=progress>=index;return <div key={stage} style={{padding:"12px 15px",borderRadius:"12px",background:reached ? "#eaf2ff" : "#f3f4f6",color:reached ? "#214c99" : "#687587",fontWeight:reached ? 700 : 400}}>{index+1}. {stage}</div>})}</div>
+                {["Rejected","Action Required"].includes(studentVisa?.status) && <p style={{marginTop:"18px",color:"#b45309"}}>Current status: {studentVisa.status}. Please read the message above for details.</p>}
+              </div>
+            </>
+          ) : activePage === "profile" ? (
             <>
               <div className="dashboard-header">
                 <div>
@@ -3784,6 +3873,7 @@ function App() {
                 </div>
               </div>
 
+              <div className="dashboard-section"><p className="section-label">Visa Application</p><h2>{studentVisa?.status || "Not Started"}</h2><p>{studentVisa?.student_note || "No visa update has been posted yet."}</p><button className="small-button" onClick={()=>setActivePage("visa")}>View Visa Status</button></div>
               {studentDataError && (
                 <div className="dashboard-section">
                   <p style={{ color: "red" }}>
