@@ -96,6 +96,8 @@ function App() {
   const [documentsError, setDocumentsError] = useState("");
   const [showDocumentForm, setShowDocumentForm] = useState(false);
   const [documentUploading, setDocumentUploading] = useState(false);
+  const [editingDocument, setEditingDocument] = useState(null);
+  const [documentDeletingId, setDocumentDeletingId] = useState(null);
   const [selectedDocumentFile, setSelectedDocumentFile] = useState(null);
   const [documentFileInputKey, setDocumentFileInputKey] = useState(0);
 
@@ -111,6 +113,9 @@ function App() {
   // =========================
 
   const [studentRecord, setStudentRecord] = useState(null);
+  const [profileEdit, setProfileEdit] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileForm, setProfileForm] = useState({address:"",guardian_name:"",guardian_contact:""});
   const [studentPayments, setStudentPayments] = useState([]);
   const [studentDocuments, setStudentDocuments] = useState([]);
   const [studentDataLoading, setStudentDataLoading] = useState(false);
@@ -181,6 +186,10 @@ function App() {
         id,
         student_id,
         full_name,
+        nic_or_passport,
+        address,
+        guardian_name,
+        guardian_contact,
         email,
         phone,
         course_or_program,
@@ -201,6 +210,10 @@ function App() {
       dbId: student.id,
       id: student.student_id,
       name: student.full_name,
+      nic_or_passport: student.nic_or_passport || "",
+      address: student.address || "",
+      guardian_name: student.guardian_name || "",
+      guardian_contact: student.guardian_contact || "",
       email: student.email || "",
       phone: student.phone || "",
       program: student.course_or_program || "",
@@ -502,6 +515,7 @@ function App() {
     }
 
     setStudentRecord(student);
+    setProfileForm({address:student.address || "",guardian_name:student.guardian_name || "",guardian_contact:student.guardian_contact || ""});
     setStudentPayments(ownPayments || []);
     setStudentDocuments(ownDocuments || []);
     await loadOwnVisa(student.student_id);
@@ -828,6 +842,7 @@ function App() {
       intake: "",
       status: "Active",
       payment: "Pending",
+      nic_or_passport: "", address: "", guardian_name: "", guardian_contact: "",
     });
 
     setShowStudentForm(true);
@@ -846,6 +861,8 @@ function App() {
       intake: student.intake,
       status: student.status,
       payment: student.payment,
+      nic_or_passport: student.nic_or_passport, address: student.address,
+      guardian_name: student.guardian_name, guardian_contact: student.guardian_contact,
     });
 
     setShowStudentForm(true);
@@ -889,6 +906,10 @@ function App() {
       intake: studentForm.intake.trim(),
       enrollment_status: studentForm.status,
       payment_status: studentForm.payment,
+      nic_or_passport: studentForm.nic_or_passport.trim(),
+      address: studentForm.address.trim(),
+      guardian_name: studentForm.guardian_name.trim(),
+      guardian_contact: studentForm.guardian_contact.trim(),
       updated_at: new Date().toISOString(),
     };
 
@@ -910,7 +931,7 @@ function App() {
       const { data: functionData, error: functionError } =
         await supabase.functions.invoke("create-student", {
           body: {
-            ...databaseRecord,
+            ...Object.fromEntries(Object.entries(databaseRecord).filter(([key]) => !["nic_or_passport", "address", "guardian_name", "guardian_contact"].includes(key))),
             temporary_password: studentForm.temporary_password,
           },
         });
@@ -1229,6 +1250,7 @@ function App() {
   // =========================
 
   const openAddDocument = () => {
+    setEditingDocument(null);
     setDocumentForm({
       student_id: "",
       document_name: "",
@@ -1238,6 +1260,47 @@ function App() {
     setSelectedDocumentFile(null);
     setDocumentFileInputKey((previous) => previous + 1);
     setShowDocumentForm(true);
+  };
+
+  const openEditDocument = (record) => {
+    setEditingDocument(record);
+    setDocumentForm({student_id:record.student_id, document_name:record.document_name, document_type:record.document_type || ""});
+    setSelectedDocumentFile(null);
+    setDocumentFileInputKey(previous => previous + 1);
+    setShowDocumentForm(true);
+  };
+
+  const deleteAdminDocument = async (record) => {
+    if (!window.confirm(`Permanently delete "${record.document_name}" for ${record.student_id}? This cannot be undone.`)) return;
+    setDocumentDeletingId(record.id);
+    // Hide the record first. If storage removal fails, restore visibility.
+    const {data:updated,error:hideError} = await supabase.from("documents").update({is_active:false}).eq("id",record.id).eq("student_id",record.student_id).select("id").single();
+    if (hideError || !updated) { alert(`Could not delete document: ${hideError?.message || "Permission denied"}`); setDocumentDeletingId(null); return; }
+    const {error:fileError} = await supabase.storage.from("student-documents").remove([record.file_path]);
+    if (fileError) {
+      const {error:restoreError} = await supabase.from("documents").update({is_active:true}).eq("id",record.id);
+      alert(`Could not delete the private file: ${fileError.message}${restoreError ? ". The document record also needs administrator recovery." : ". No changes were kept."}`);
+      setDocumentDeletingId(null); await loadDocuments(); return;
+    }
+    const {error:deleteError} = await supabase.from("documents").delete().eq("id",record.id);
+    if (deleteError) alert(`File removed and document hidden, but database cleanup needs attention: ${deleteError.message}`);
+    setDocumentDeletingId(null); await loadDocuments();
+  };
+
+  const saveStudentProfile = async (event) => {
+    event.preventDefault();
+    if (!studentRecord || profileSaving) return;
+    setProfileSaving(true);
+    const {error:saveError} = await supabase.rpc("update_my_contact_details", {
+      p_address: profileForm.address.trim(),
+      p_guardian_name: profileForm.guardian_name.trim(),
+      p_guardian_contact: profileForm.guardian_contact.trim()
+    });
+    setProfileSaving(false);
+    if (saveError) { alert(`Could not save profile: ${saveError.message}`); return; }
+    setStudentRecord(previous => ({...previous,...profileForm}));
+    setProfileEdit(false);
+    alert("Profile details updated.");
   };
 
   const handleDocumentFormChange = (event) => {
@@ -1260,7 +1323,7 @@ function App() {
     if (
       !documentForm.student_id ||
       !documentForm.document_name.trim() ||
-      !selectedDocumentFile
+      (!editingDocument && !selectedDocumentFile)
     ) {
       alert("Please select a student, enter a document name and choose a file.");
       return;
@@ -1272,14 +1335,14 @@ function App() {
       "image/png",
     ];
 
-    if (!allowedTypes.includes(selectedDocumentFile.type)) {
+    if (selectedDocumentFile && !allowedTypes.includes(selectedDocumentFile.type)) {
       alert("Only PDF, JPG, JPEG and PNG files are allowed.");
       return;
     }
 
     const maxFileSize = 10 * 1024 * 1024;
 
-    if (selectedDocumentFile.size > maxFileSize) {
+    if (selectedDocumentFile && selectedDocumentFile.size > maxFileSize) {
       alert("The file is too large. Maximum allowed size is 10 MB.");
       return;
     }
@@ -1298,65 +1361,36 @@ function App() {
       return;
     }
 
-    const safeFileName = selectedDocumentFile.name
-      .replace(/[^a-zA-Z0-9._-]/g, "_")
-      .replace(/_+/g, "_");
-
-    const filePath =
-      `${documentForm.student_id}/${Date.now()}-${safeFileName}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("student-documents")
-      .upload(filePath, selectedDocumentFile, {
-        cacheControl: "3600",
-        upsert: false,
-        contentType: selectedDocumentFile.type,
-      });
-
-    if (uploadError) {
-      console.error(uploadError);
-      alert(`Could not upload file: ${uploadError.message}`);
-      setDocumentUploading(false);
-      return;
+    let filePath = editingDocument?.file_path || "";
+    let uploadedNewFile = false;
+    if (selectedDocumentFile) {
+      const safeFileName = selectedDocumentFile.name.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_");
+      filePath = `${documentForm.student_id}/${Date.now()}-${Math.random().toString(36).slice(2,10)}-${safeFileName}`;
+      const {error:uploadError} = await supabase.storage.from("student-documents").upload(filePath, selectedDocumentFile, {cacheControl:"3600",upsert:false,contentType:selectedDocumentFile.type});
+      if (uploadError) {alert(`Could not upload file: ${uploadError.message}`);setDocumentUploading(false);return;}
+      uploadedNewFile = true;
     }
-
-    const documentType =
-      documentForm.document_type.trim() ||
-      (selectedDocumentFile.type === "application/pdf"
-        ? "PDF"
-        : "Image");
-
-    const { error: insertError } = await supabase
-      .from("documents")
-      .insert([
-        {
-          student_id: documentForm.student_id,
-          document_name: documentForm.document_name.trim(),
-          document_type: documentType,
-          file_path: filePath,
-          uploaded_by: user.id,
-          is_active: true,
-        },
-      ]);
-
-    if (insertError) {
-      console.error(insertError);
-
-      await supabase.storage
-        .from("student-documents")
-        .remove([filePath]);
-
-      alert(`Could not save document record: ${insertError.message}`);
-      setDocumentUploading(false);
-      return;
+    const documentType = documentForm.document_type.trim() || (selectedDocumentFile ? (selectedDocumentFile.type === "application/pdf" ? "PDF" : "Image") : editingDocument?.document_type || "Document");
+    const payload = {document_name:documentForm.document_name.trim(),document_type:documentType,file_path:filePath};
+    const result = editingDocument
+      ? await supabase.from("documents").update(payload).eq("id",editingDocument.id).eq("student_id",editingDocument.student_id).select("id").single()
+      : await supabase.from("documents").insert({...payload,student_id:documentForm.student_id,uploaded_by:user.id,is_active:true}).select("id").single();
+    if (result.error || !result.data) {
+      if (uploadedNewFile) await supabase.storage.from("student-documents").remove([filePath]);
+      alert(`Could not save document record: ${result.error?.message || "Permission denied"}`);
+      setDocumentUploading(false);return;
     }
-
+    if (editingDocument && uploadedNewFile && editingDocument.file_path !== filePath) {
+      const {error:oldFileError} = await supabase.storage.from("student-documents").remove([editingDocument.file_path]);
+      if (oldFileError) alert("Document updated, but the old file could not be removed. Please contact the administrator to clean up the old storage file.");
+    }
     setDocumentUploading(false);
     setShowDocumentForm(false);
     setSelectedDocumentFile(null);
     setDocumentFileInputKey((previous) => previous + 1);
 
-    alert("Document uploaded successfully.");
+    alert(editingDocument ? "Document updated successfully." : "Document uploaded successfully.");
+    setEditingDocument(null);
 
     await loadDocuments();
   };
@@ -2102,6 +2136,13 @@ function App() {
                       onChange={handleStudentFormChange}
                     />
 
+                    {editingStudentId && [["NIC / Passport", "nic_or_passport"], ["Address", "address"], ["Guardian Name", "guardian_name"], ["Guardian Contact", "guardian_contact"]].map(([label, field]) => (
+                      <Fragment key={field}>
+                        <label>{label}</label>
+                        <input type="text" name={field} value={studentForm[field] || ""} onChange={handleStudentFormChange} />
+                      </Fragment>
+                    ))}
+
                     <label>Program</label>
 
                     <input
@@ -2785,7 +2826,7 @@ function App() {
                     Private Student Document
                   </p>
 
-                  <h2>Upload Document</h2>
+                  <h2>{editingDocument ? "Edit Document" : "Upload Document"}</h2>
 
                   <form onSubmit={handleDocumentUpload}>
                     <label>Student</label>
@@ -2794,6 +2835,7 @@ function App() {
                       name="student_id"
                       value={documentForm.student_id}
                       onChange={handleDocumentFormChange}
+                      disabled={Boolean(editingDocument)}
                       style={{
                         padding: "14px",
                         marginBottom: "18px",
@@ -2835,7 +2877,7 @@ function App() {
                       placeholder="Example: Academic"
                     />
 
-                    <label>File</label>
+                    <label>{editingDocument ? "Replace File (optional)" : "File"}</label>
 
                     <input
                       key={documentFileInputKey}
@@ -2866,8 +2908,8 @@ function App() {
                         disabled={documentUploading}
                       >
                         {documentUploading
-                          ? "Uploading..."
-                          : "Upload Document"}
+                          ? "Saving..."
+                          : editingDocument ? "Save Changes" : "Upload Document"}
                       </button>
 
                       <button
@@ -2875,6 +2917,7 @@ function App() {
                         className="signout-button"
                         onClick={() => {
                           setShowDocumentForm(false);
+                          setEditingDocument(null);
                           setSelectedDocumentFile(null);
                           setDocumentFileInputKey(
                             (previous) => previous + 1
@@ -2977,6 +3020,10 @@ function App() {
                                 >
                                   View
                                 </button>
+                                {" "}
+                                <button className="small-button" onClick={() => openEditDocument(documentRecord)}>Edit</button>
+                                {" "}
+                                <button className="small-button" style={{backgroundColor:"#b42318",color:"white"}} disabled={documentDeletingId === documentRecord.id} onClick={() => deleteAdminDocument(documentRecord)}>{documentDeletingId === documentRecord.id ? "Deleting..." : "Delete"}</button>
                               </td>
                             </tr>
                           ))}
@@ -3298,6 +3345,16 @@ function App() {
                 </p>
 
                 <h2>Student Profile</h2>
+                <button type="button" className="small-button" onClick={() => {setProfileEdit(!profileEdit);setProfileForm({address:studentRecord.address || "",guardian_name:studentRecord.guardian_name || "",guardian_contact:studentRecord.guardian_contact || ""});}}>{profileEdit ? "Cancel Editing" : "Edit Contact & Guardian Details"}</button>
+                {profileEdit && (
+                  <form onSubmit={saveStudentProfile} style={{marginTop:16,marginBottom:20}}>
+                    <label>Address</label><input value={profileForm.address} onChange={e => setProfileForm(p => ({...p,address:e.target.value}))} />
+                    <label>Guardian Name</label><input value={profileForm.guardian_name} onChange={e => setProfileForm(p => ({...p,guardian_name:e.target.value}))} />
+                    <label>Guardian Contact</label><input value={profileForm.guardian_contact} onChange={e => setProfileForm(p => ({...p,guardian_contact:e.target.value}))} />
+                    <p style={{fontSize:13,color:"#64748b"}}>NIC / Passport can only be changed by an administrator.</p>
+                    <button type="submit" disabled={profileSaving}>{profileSaving ? "Saving..." : "Save Profile Changes"}</button>
+                  </form>
+                )}
 
                 <div className="detail-row">
                   <span>Full Name</span>
